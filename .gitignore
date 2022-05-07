@@ -1,0 +1,5 @@
+audio/*
+*.html
+.idea 
+anki-flashcard.csv
+audio-error.txt
