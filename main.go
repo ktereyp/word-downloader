@@ -42,8 +42,6 @@ func main() {
 		postAction = AnCsv
 	}
 
-	downloader := newDownloader(myDict, postAction)
-
 	var wordSourceFile *os.File
 	if *wordList == "" {
 		wordSourceFile = os.Stdin
@@ -56,6 +54,8 @@ func main() {
 		wordSourceFile = f
 		defer f.Close()
 	}
+
+	downloader := newDownloader(myDict, postAction)
 
 	count := 0
 	bufInput := bufio.NewReader(wordSourceFile)
