@@ -3,3 +3,4 @@ audio/*
 .idea 
 anki-flashcard.csv
 audio-error.txt
+/webster/*

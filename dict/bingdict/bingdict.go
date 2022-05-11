@@ -1,7 +1,7 @@
 package bingdict
 
 import (
-	"word-downloader/dict"
+	"encoding/json"
 	"fmt"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly/v2"
@@ -11,10 +11,68 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"word-downloader/dict"
 )
 
 type bingDict struct {
 	transport *http.Transport
+}
+
+type Word struct {
+	W        string
+	Audio    Audio
+	Defs     []Definition
+	Pictures []string
+	Examples []Example
+}
+
+func (w Word) Word() string {
+	return w.W
+}
+
+func (w Word) Json() string {
+	buf, _ := json.Marshal(w)
+	return string(buf)
+}
+
+func (w Word) Type() dict.Dictionary {
+	return dict.BingDict
+}
+
+func (w Word) Mp3() []string {
+	return []string{
+		w.Audio.UKAudio,
+		w.Audio.USAudio,
+	}
+}
+
+var _ dict.Word = Word{}
+
+type Definition struct {
+	PartOfSpeech string
+	Def          []SubDefinition
+	Examples     []Example
+	Raw          string
+}
+
+type SubDefinition struct {
+	Def      string
+	Raw      string
+	Examples []Example
+}
+
+type Audio struct {
+	PronunciationUS string
+	USAudio         string
+	PronunciationUK string
+	UKAudio         string
+}
+
+type Example struct {
+	Phrase string
+	Text   string
+	Raw    string
+	Audio  string
 }
 
 func NewBingDict() *bingDict {
@@ -26,6 +84,23 @@ func NewBingDict() *bingDict {
 		IdleConnTimeout:     time.Minute * 10,
 	},
 	}
+}
+
+func (bing *bingDict) Type() dict.Dictionary {
+	return dict.BingDict
+}
+
+func (bing *bingDict) Parse(wordJson []byte) (dict.Word, error) {
+	var word Word
+	return word, json.Unmarshal(wordJson, &word)
+}
+
+func (w Word) Pronunciation() string {
+	return ""
+}
+
+func (w Word) DefinitionHtml() string {
+	return ""
 }
 
 func (bing *bingDict) Lookup(word string) (dict.Word, error) {
@@ -42,7 +117,7 @@ func (bing *bingDict) Lookup(word string) (dict.Word, error) {
 		},
 	})
 
-	out := dict.Word{}
+	out := Word{}
 
 	// get head word
 	col.OnHTML("#headword > h1:nth-child(1) > strong:nth-child(1)", func(element *colly.HTMLElement) {
@@ -80,13 +155,13 @@ func (bing *bingDict) Lookup(word string) (dict.Word, error) {
 	})
 
 	// simple definition
-	var simpleDef dict.Definition
+	var simpleDef Definition
 	var plural string
 	col.OnHTML(".qdef > ul:nth-child(2)", func(element *colly.HTMLElement) {
 		html, _ := element.DOM.Html()
-		simpleDef.Kind = "simple-def"
+		simpleDef.PartOfSpeech = "simple-def"
 		simpleDef.Raw = html
-		simpleDef.Def = element.Text
+		simpleDef.Def = []SubDefinition{{Def: element.Text}}
 	})
 	col.OnHTML(".hd_div1", func(element *colly.HTMLElement) {
 		text := element.DOM.Text()
@@ -104,10 +179,10 @@ func (bing *bingDict) Lookup(word string) (dict.Word, error) {
 		})
 		html, _ := element.DOM.Html()
 
-		out.Defs = append(out.Defs, dict.Definition{
-			Kind: "auth",
-			Def:  element.Text,
-			Raw:  html,
+		out.Defs = append(out.Defs, Definition{
+			PartOfSpeech: "auth",
+			Def:          []SubDefinition{{Def: element.Text}},
+			Raw:          html,
 		})
 	})
 	col.OnHTML("#homoid", func(element *colly.HTMLElement) {
@@ -118,18 +193,18 @@ func (bing *bingDict) Lookup(word string) (dict.Word, error) {
 
 		html, _ := element.DOM.Html()
 
-		out.Defs = append(out.Defs, dict.Definition{
-			Kind: "homo",
-			Def:  element.DOM.Text(),
-			Raw:  html,
+		out.Defs = append(out.Defs, Definition{
+			PartOfSpeech: "homo",
+			Def:          []SubDefinition{{Def: element.DOM.Text()}},
+			Raw:          html,
 		})
 	})
 	col.OnHTML("#crossid", func(element *colly.HTMLElement) {
 		html, _ := element.DOM.Html()
-		out.Defs = append(out.Defs, dict.Definition{
-			Kind: "cross",
-			Def:  element.Text,
-			Raw:  html,
+		out.Defs = append(out.Defs, Definition{
+			PartOfSpeech: "cross",
+			Def:          []SubDefinition{{Def: element.Text}},
+			Raw:          html,
 		})
 	})
 
@@ -149,7 +224,7 @@ func (bing *bingDict) Lookup(word string) (dict.Word, error) {
 		})
 
 		html, _ := element.DOM.Html()
-		out.Examples = append(out.Examples, dict.Example{
+		out.Examples = append(out.Examples, Example{
 			Text: element.DOM.Text(),
 			Raw:  html,
 		})
@@ -166,17 +241,17 @@ func (bing *bingDict) Lookup(word string) (dict.Word, error) {
 	)
 	err := col.Visit(searchUrl)
 	if err != nil {
-		return dict.Word{}, err
+		return Word{}, err
 	}
 
 	if simpleDef.Raw != "" {
 		simpleDef.Raw = fmt.Sprintf(`<div class="simple-def">%v</div> <div class="word-plural">%v</div>`,
 			simpleDef.Raw, plural)
-		out.Defs = append([]dict.Definition{simpleDef}, out.Defs...)
+		out.Defs = append([]Definition{simpleDef}, out.Defs...)
 	}
 
 	if out.W == "" {
-		return dict.Word{}, dict.ErrNotFound
+		return Word{}, dict.ErrNotFound
 	}
 
 	return out, nil

@@ -4,32 +4,24 @@ import "fmt"
 
 var ErrNotFound = fmt.Errorf("not found")
 
+type Dictionary string
+
+const (
+	Webster  Dictionary = "webster"
+	BingDict Dictionary = "bing-dict"
+)
+
 type Dict interface {
 	Lookup(word string) (Word, error)
+	Parse(wordJson []byte) (Word, error)
+	Type() Dictionary
 }
 
-type Word struct {
-	W        string
-	Defs     []Definition
-	Audio    Audio
-	Pictures []string
-	Examples []Example
-}
-
-type Definition struct {
-	Kind string
-	Def  string
-	Raw  string
-}
-
-type Audio struct {
-	PronunciationUS string
-	USAudio         string
-	PronunciationUK string
-	UKAudio         string
-}
-
-type Example struct {
-	Text string
-	Raw  string
+type Word interface {
+	Word() string
+	Pronunciation() string
+	DefinitionHtml() string
+	Json() string
+	Type() Dictionary
+	Mp3() []string
 }
