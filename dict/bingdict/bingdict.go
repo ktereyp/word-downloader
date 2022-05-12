@@ -99,7 +99,7 @@ func (w Word) Pronunciation() string {
 	return ""
 }
 
-func (w Word) DefinitionHtml() string {
+func (w Word) DefinitionHtml(showWord bool) string {
 	return ""
 }
 

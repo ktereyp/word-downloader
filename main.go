@@ -10,37 +10,63 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"word-downloader/dict"
 	"word-downloader/dict/bingdict"
+	"word-downloader/dict/dictcn"
 	"word-downloader/dict/webster"
 )
 
 var wordList = flag.String("word-list", "", "word list, if empty, read from stdio")
-var dictionary = flag.String("dict", "webster", "dictionary, support: webster")
+var dictionary = flag.String("dicts", "webster", "dictionary, comma separated. support: webster, dictcn")
 var sleepInterval = flag.Int64("sleep-interval", 1, "number of seconds to sleep before downloading next word")
 var ankiCsv = flag.Bool("anki", false, "generate anki-flash csv file")
+var downloadMp3 = flag.Bool("download-mp3", true, "whether download mp3")
+
+var ankiDictScore = map[dict.Dictionary]int{
+	dict.Dictcn:   1,
+	dict.Webster:  2,
+	dict.BingDict: 3,
+}
 
 func main() {
 	flag.Parse()
 
-	var myDict dict.Dict
-	switch dict.Dictionary(*dictionary) {
-	case dict.Webster:
-		myDict = webster.NewDict()
-	case dict.BingDict:
-		myDict = bingdict.NewBingDict()
-	default:
-		_, _ = fmt.Fprintf(os.Stderr, "unsuported dictionary: %v", *dictionary)
-		flag.PrintDefaults()
-		os.Exit(1)
+	var myDicts []dict.Dict
+	for _, dictName := range strings.Split(*dictionary, ",") {
+		if dictName == "" {
+			continue
+		}
+		switch dict.Dictionary(dictName) {
+		case dict.Webster:
+			myDicts = append(myDicts, webster.NewDict())
+		case dict.BingDict:
+			myDicts = append(myDicts, bingdict.NewBingDict())
+		case dict.Dictcn:
+			myDicts = append(myDicts, dictcn.NewDict())
+		default:
+			_, _ = fmt.Fprintf(os.Stderr, "unsuported dictionary: %v", *dictionary)
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
 	}
 
 	postAction := PostAction("")
 	if *ankiCsv {
 		postAction = AnCsv
 	}
+
+	var ankiFile *os.File
+	if postAction == AnCsv {
+		var err error
+		ankiFile, err = os.Create("anki-flashcard.csv")
+		if err != nil {
+			log.Fatalf("error: cannot create anki-flashcard.csv: %v", err)
+		}
+	}
+	defer ankiFile.Close()
 
 	var wordSourceFile *os.File
 	if *wordList == "" {
@@ -55,7 +81,13 @@ func main() {
 		defer f.Close()
 	}
 
-	downloader := newDownloader(myDict, postAction)
+	sort.Slice(myDicts, func(i, j int) bool {
+		return ankiDictScore[myDicts[i].Type()] < ankiDictScore[myDicts[j].Type()]
+	})
+	var downloaders []*Downloader
+	for _, dict := range myDicts {
+		downloaders = append(downloaders, newDownloader(dict))
+	}
 
 	count := 0
 	bufInput := bufio.NewReader(wordSourceFile)
@@ -66,10 +98,24 @@ func main() {
 			break
 		}
 		if len(wordBytes) > 0 {
-			downloader.download(strings.TrimSpace(string(wordBytes)))
-			log.Printf("finish: %v", count)
+			cached := true
+			var words []dict.Word
+			for _, downloader := range downloaders {
+				word, wordCached, err := downloader.download(strings.TrimSpace(string(wordBytes)))
+				cached = cached && wordCached
+				if err == nil {
+					words = append(words, word)
+				}
+			}
 
-			time.Sleep(time.Second * time.Duration(*sleepInterval))
+			// write to anki csv file
+			if len(words) > 0 && ankiFile != nil {
+				writeToAnkiCsv(ankiFile, words)
+			}
+			log.Printf("finish: %v", count)
+			if !cached {
+				time.Sleep(time.Second * time.Duration(*sleepInterval))
+			}
 			count++
 		}
 		if err != nil {
@@ -95,7 +141,7 @@ const (
 	AnCsv PostAction = "anki-csv"
 )
 
-func newDownloader(dict dict.Dict, postAction PostAction) *Downloader {
+func newDownloader(dict dict.Dict) *Downloader {
 	myDictDir := string(dict.Type())
 	err := os.MkdirAll(myDictDir, 0755)
 	if err != nil {
@@ -139,14 +185,6 @@ func newDownloader(dict dict.Dict, postAction PostAction) *Downloader {
 	}
 	downloader.audioErrFile = errFile
 
-	if postAction == AnCsv {
-		ankiFile, err := os.Create("anki-flashcard.csv")
-		if err != nil {
-			log.Fatalf("error: cannot create anki-flashcard.csv: %v", err)
-		}
-		downloader.ankiFile = ankiFile
-	}
-
 	return downloader
 }
 
@@ -170,19 +208,19 @@ func (d *Downloader) loadAllFinished() {
 	}
 }
 
-func (d *Downloader) download(keyword string) error {
-	var err error
+func (d *Downloader) download(keyword string) (word dict.Word, cached bool, err error) {
 	word, exist := d.existWords[keyword]
 	if !exist {
 		word, err = d.dict.Lookup(keyword)
 		if err != nil {
 			log.Printf("error: cannot query '%v': %v", keyword, err)
-			return err
+			return nil, false, err
 		}
 		log.Printf(" lookup ok: %v", word.Word())
 	} else {
 		log.Printf(" lookup ok: %v [cache]", word.Word())
 	}
+	cached = exist
 	// write to disk
 	if !exist {
 		_, err = d.words.WriteString(word.Json() + "\n")
@@ -193,78 +231,99 @@ func (d *Downloader) download(keyword string) error {
 		d.existWords[word.Word()] = word
 	}
 	// download mp3/pic
-	for _, mp3Url := range word.Mp3() {
-		err = d.downloadMp3(mp3Url)
-		if err != nil {
-			log.Printf("error: cannot download mp3 '%v': %v", mp3Url, err)
+	if *downloadMp3 {
+		for _, mp3Url := range word.Mp3() {
+			mp3Cached, err := d.downloadMp3(mp3Url)
+			if err != nil {
+				log.Printf("error: cannot download mp3 '%v': %v", mp3Url, err)
+			}
+			cached = cached && mp3Cached
 		}
 	}
 
-	if d.ankiFile != nil {
-		var mp3File string
-		mp3 := word.Mp3()
-		if len(mp3) > 0 {
-			mp3File = path.Base(mp3[0])
-		}
-
-		d.writeToAnkiCsv(word, mp3File)
-	}
-
-	return nil
+	return word, cached, nil
 }
 
-func (d *Downloader) downloadMp3(url string) error {
+func (d *Downloader) downloadMp3(url string) (cached bool, err error) {
 	storeName := path.Base(url)
 	return d.downloadFile(url, filepath.Join(d.audioDir, storeName))
 }
 
-func (d *Downloader) downloadPic(url string) error {
+func (d *Downloader) downloadPic(url string) (cached bool, err error) {
 	storeName := path.Base(url)
 	return d.downloadFile(url, filepath.Join(d.picDir, storeName))
 }
 
-func (d *Downloader) downloadFile(url string, storeName string) error {
+func (d *Downloader) downloadFile(url string, storeName string) (cached bool, err error) {
 	if url == "" {
-		return nil
+		return false, nil
 	}
-	_, err := os.Stat(storeName)
+	_, err = os.Stat(storeName)
 	if err == nil {
-		return nil
+		return true, nil
 	}
 	tmpFile := storeName + ".tmp"
 	f, err := os.Create(tmpFile)
 	if err != nil {
-		return err
+		return false, err
 	}
 	resp, err := http.Get(url)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
 	_, err = io.Copy(f, resp.Body)
 	if err != nil {
 		_ = f.Close()
-		return err
+		return false, err
 	}
 	_ = f.Close()
 	log.Printf(" download ok: %v", url)
-	return os.Rename(tmpFile, storeName)
+	return false, os.Rename(tmpFile, storeName)
 }
 
-func (d *Downloader) writeToAnkiCsv(word dict.Word, mp3File string) error {
-	// word | example | word_html | sound
-	if d.ankiFile == nil {
-		return nil
+func writeToAnkiCsv(ankiFile *os.File, words []dict.Word) error {
+	// word | pronunciation | example | word_html | sound
+
+	var plainWord string
+
+	defSb := strings.Builder{}
+	defSb.WriteString(`<div class="background_card">`)
+	var mp3 string
+	var pronunciation string
+	for _, word := range words {
+		if plainWord == "" {
+			plainWord = word.Word()
+			pronunciation = fmt.Sprintf(`<div class="pronunciation">%v</div>`, word.Pronunciation())
+			defSb.WriteString(`<div class="this-word">`)
+			defSb.WriteString(plainWord)
+			defSb.WriteString(`</div>`)
+		}
+		defSb.WriteString(fmt.Sprintf(`<div class="dict %v">%v</div>`, word.Type(), word.DefinitionHtml(false)))
+		if word.Type() == dict.Webster {
+			mp3List := word.Mp3()
+			if len(mp3List) > 0 {
+				mp3 = path.Base(mp3List[0])
+			}
+		}
 	}
+	defSb.WriteString(`</div>`)
+
 	sb := strings.Builder{}
-	sb.WriteString(word.Word())
+	sb.WriteString(plainWord)
+	sb.WriteString("|")
+	sb.WriteString(escapeVerticalBar(pronunciation))
 	sb.WriteString("|")
 	sb.WriteString("")
 	sb.WriteString("|")
-	sb.WriteString(fmt.Sprintf(`<div class="word">%v</div>`, word.DefinitionHtml()))
+	sb.WriteString(fmt.Sprintf(`<div class="word">%v</div>`, escapeVerticalBar(defSb.String())))
 	sb.WriteString("|")
-	sb.WriteString(fmt.Sprintf(`[sound:%v]`, mp3File))
+	sb.WriteString(fmt.Sprintf(`[sound:%v]`, mp3))
 	sb.WriteString("\n")
-	_, err := d.ankiFile.WriteString(sb.String())
+	_, err := ankiFile.WriteString(sb.String())
 	return err
+}
+
+func escapeVerticalBar(s string) string {
+	return strings.ReplaceAll(s, "|", "%7C")
 }
