@@ -297,7 +297,7 @@ func partOfSpeech(pos string) string {
 		return "vt."
 	}
 	if pos == "intransitive verb" {
-		return "v."
+		return "vi."
 	}
 	return pos
 }

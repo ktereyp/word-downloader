@@ -24,6 +24,7 @@ var dictionary = flag.String("dicts", "webster", "dictionary, comma separated. s
 var sleepInterval = flag.Int64("sleep-interval", 1, "number of seconds to sleep before downloading next word")
 var ankiCsv = flag.Bool("anki", false, "generate anki-flash csv file")
 var downloadMp3 = flag.Bool("download-mp3", true, "whether download mp3")
+var queryOnline = flag.Bool("query-online", true, "query online when missing")
 
 var ankiDictScore = map[dict.Dictionary]int{
 	dict.Dictcn:   1,
@@ -148,15 +149,10 @@ func newDownloader(dict dict.Dict) *Downloader {
 		log.Fatalf("error: cannot mkdir: %v", err)
 		return nil
 	}
-	err = os.Chdir(myDictDir)
-	if err != nil {
-		log.Fatalf("error: cannot change dir: %v", err)
-		return nil
-	}
 	downloader := &Downloader{
 		dict:     dict,
-		audioDir: "audio",
-		picDir:   "pic",
+		audioDir: filepath.Join(myDictDir, "audio"),
+		picDir:   filepath.Join(myDictDir, "pic"),
 	}
 
 	err = os.MkdirAll(downloader.audioDir, 0755)
@@ -171,7 +167,7 @@ func newDownloader(dict dict.Dict) *Downloader {
 		return nil
 	}
 
-	words, err := os.OpenFile("words.txt", os.O_RDWR|os.O_CREATE, 0644)
+	words, err := os.OpenFile(filepath.Join(myDictDir, "words.txt"), os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		log.Fatalf("error: cannot create words.txt: %v", err)
 	}
@@ -179,7 +175,7 @@ func newDownloader(dict dict.Dict) *Downloader {
 	// read all finished
 	downloader.loadAllFinished()
 
-	errFile, err := os.OpenFile("audio-error.txt", os.O_RDWR|os.O_APPEND|os.O_CREATE, 0644)
+	errFile, err := os.OpenFile(filepath.Join(myDictDir, "audio-error.txt"), os.O_RDWR|os.O_APPEND|os.O_CREATE, 0644)
 	if err != nil {
 		log.Fatalf("error: cannot create audio-error.txt: %v", err)
 	}
@@ -211,6 +207,9 @@ func (d *Downloader) loadAllFinished() {
 func (d *Downloader) download(keyword string) (word dict.Word, cached bool, err error) {
 	word, exist := d.existWords[keyword]
 	if !exist {
+		if !*queryOnline {
+			return nil, true, fmt.Errorf("not found")
+		}
 		word, err = d.dict.Lookup(keyword)
 		if err != nil {
 			log.Printf("error: cannot query '%v': %v", keyword, err)
