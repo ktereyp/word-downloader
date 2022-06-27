@@ -3,19 +3,18 @@ package collins
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/gocolly/colly/v2"
-	"net"
-	"net/http"
-	"net/url"
+	"github.com/tebeka/selenium"
+	"github.com/tebeka/selenium/chrome"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"strings"
-	"time"
 	"word-downloader/dict"
 )
 
 type Word struct {
-	W     string
-	Audio Audio
-	Defs  []Definition
+	W    string
+	Defs []Definition
 }
 
 func (w Word) Word() string {
@@ -32,25 +31,31 @@ func (w Word) Type() dict.Dictionary {
 }
 
 func (w Word) Mp3() []string {
-	return []string{
-		w.Audio.Mp3,
-	}
+	return []string{}
 }
 
 func (w Word) Pronunciation() string {
-	return w.Audio.Syllables + " | " + fmt.Sprintf("/%v/", w.Audio.Pronunciation)
+	return ""
 }
 
-func (w Word) DefinitionHtml() string {
+func (w Word) DefinitionHtml(showWord bool) string {
 	sb := strings.Builder{}
-	sb.WriteString(`<div class="content">`)
 
-	sb.WriteString(`<div class="this-word">`)
-	sb.WriteString(w.W)
-	sb.WriteString(`</div>`)
+	sb.WriteString(`<div class="word-content">`)
+	sb.WriteString(fmt.Sprintf(`<div class="dict-name">%v</div>`, w.Type().Name()))
 
-	for _, def := range w.Defs {
-		sb.WriteString(def.Html())
+	if showWord {
+		sb.WriteString(`<div class="this-word">`)
+		sb.WriteString(w.W)
+		sb.WriteString(`</div>`)
+	}
+
+	if len(w.Defs) > 1 {
+		for i, def := range w.Defs {
+			sb.WriteString(def.Html(i + 1))
+		}
+	} else if len(w.Defs) == 1 {
+		sb.WriteString(w.Defs[0].Html(0))
 	}
 
 	sb.WriteString(`</div>`)
@@ -60,68 +65,34 @@ func (w Word) DefinitionHtml() string {
 var _ dict.Word = Word{}
 
 type Definition struct {
-	PartOfSpeech    string
-	DefinitionEntry []DefinitionEntry
+	PartOfSpeech string
+	Def          string
+	Examples     []Example
 }
 
-func (d Definition) Html() string {
+func (d Definition) Html(serialNo int) string {
 	sb := strings.Builder{}
 	sb.WriteString(`<div class="definitions">`)
 
 	sb.WriteString(`<div class="pos">`)
-	sb.WriteString(partOfSpeech(d.PartOfSpeech))
+	if serialNo > 0 {
+		sb.WriteString(fmt.Sprintf("%v. ", serialNo) + partOfSpeech(d.PartOfSpeech))
+	} else {
+		sb.WriteString(partOfSpeech(d.PartOfSpeech))
+	}
 	sb.WriteString(`</div>`)
 
-	for i, subDef := range d.DefinitionEntry {
-		sb.WriteString(`<div class="def-entry">`)
+	sb.WriteString(`<div class="collins-def">`)
+	sb.WriteString(d.Def)
+	sb.WriteString(`</div>`)
 
-		sb.WriteString(`<table class="table-align">`)
-		sb.WriteString(`<tr class="table-align">`)
-
-		sb.WriteString(`<td class="table-align">`)
-		sb.WriteString(`<div class="serial-no">`)
-		sb.WriteString(fmt.Sprintf("%v", i+1))
-		sb.WriteString(`</div>`)
-		sb.WriteString("</td>")
-
-		sb.WriteString("<td>")
-		sb.WriteString(subDef.Html())
-		sb.WriteString("</td>")
-
-		sb.WriteString("</tr>")
-		sb.WriteString("</table>")
-
-		sb.WriteString(`</div>`)
+	for _, example := range d.Examples {
+		sb.WriteString(`<div class="collins-use-examples">`)
+		sb.WriteString(example.Html())
+		sb.WriteString("</div>")
 	}
 
 	sb.WriteString("</div>")
-	return sb.String()
-}
-
-type DefinitionEntry struct {
-	PartOfSpeech       string
-	SubDefinitionEntry []SubDefinition
-}
-
-func (d DefinitionEntry) Html() string {
-	sb := strings.Builder{}
-	sb.WriteString(`<div class="sub-def-list">`)
-	sb.WriteString(`<table class="table-align">`)
-	if d.PartOfSpeech != "" {
-		sb.WriteString(`<div class="pos">`)
-		sb.WriteString(partOfSpeech(d.PartOfSpeech))
-		sb.WriteString(`</div>`)
-	}
-
-	for _, subDef := range d.SubDefinitionEntry {
-		sb.WriteString(`<tr class="table-align">`)
-		sb.WriteString(`<td class="table-align">`)
-		sb.WriteString(subDef.Html())
-		sb.WriteString(`</td>`)
-		sb.WriteString(`</tr>`)
-	}
-	sb.WriteString(`</table>`)
-	sb.WriteString(`</div>`)
 	return sb.String()
 }
 
@@ -161,7 +132,8 @@ func (e Example) Html() string {
 }
 
 type collinsDict struct {
-	httpClient *http.Client
+	service *selenium.Service
+	wd      selenium.WebDriver
 }
 
 func (collins *collinsDict) Parse(wordJson []byte) (dict.Word, error) {
@@ -171,16 +143,41 @@ func (collins *collinsDict) Parse(wordJson []byte) (dict.Word, error) {
 }
 
 func NewDict() *collinsDict {
+	os.MkdirAll(filepath.Join(string(dict.Collins), "pages"), 0755)
+
+	const (
+		seleniumPath     = "selenium/selenium-server.jar"
+		chromeDriverPath = "selenium/chromedriver"
+		port             = 8080
+	)
+	opts := []selenium.ServiceOption{
+		selenium.ChromeDriver(chromeDriverPath), // Specify the path to GeckoDriver in order to use Firefox.
+		//selenium.Output(os.Stderr),              // Output debug information to STDERR.
+	}
+	service, err := selenium.NewSeleniumService(seleniumPath, port, opts...)
+	if err != nil {
+		panic(err) // panic is used only as an example and is not otherwise recommended.
+	}
+
+	// Connect to the WebDriver instance running locally.
+	//caps := selenium.Capabilities{"browserName": "firefox"}
+	caps := selenium.Capabilities{"browserName": "chrome"}
+	caps.AddChrome(chrome.Capabilities{
+		Path: "selenium/chrome-linux/chrome",
+	})
+	caps.AddProxy(selenium.Proxy{
+		Type: selenium.Manual,
+		HTTP: "http://127.0.0.1:8888",
+		SSL:  "http://127.0.0.1:8888",
+	})
+	wd, err := selenium.NewRemote(caps, fmt.Sprintf("http://localhost:%d/wd/hub", port))
+	if err != nil {
+		panic(err)
+	}
+
 	return &collinsDict{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				Proxy:               nil,
-				DialContext:         (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-				MaxIdleConns:        256,
-				MaxIdleConnsPerHost: 256,
-				IdleConnTimeout:     time.Minute * 10,
-			},
-		},
+		service: service,
+		wd:      wd,
 	}
 }
 
@@ -189,45 +186,51 @@ func (collins *collinsDict) Type() dict.Dictionary {
 }
 
 func (collins *collinsDict) Lookup(word string) (dict.Word, error) {
-	col := colly.NewCollector(
-		colly.UserAgent("Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36"),
-	)
-	col.SetClient(collins.httpClient)
-
-	out := Word{}
-
-	col.OnHTML(".title_container", func(element *colly.HTMLElement) {
-		word := element.DOM.Find("h2.h2_entry > span.orth").Text()
-		println(word)
-	})
-
-	col.OnRequest(func(r *colly.Request) {
-		r.Headers.Add("accept", "*/*")
-	})
-
-	urlEncodedWord := url.QueryEscape(word)
-	searchUrl := fmt.Sprintf(
-		"https://www.collinsdictionary.com/dictionary/english/%v",
-		urlEncodedWord,
-	)
-	err := col.Visit(searchUrl)
-	if err != nil {
-		return Word{}, err
+	if err := collins.wd.Get("https://www.collinsdictionary.com/dictionary/english/" + word); err != nil {
+		return nil, err
 	}
 
-	if out.W == "" {
-		return Word{}, dict.ErrNotFound
+	id := fmt.Sprintf("%v__1", strings.ToLower(word))
+	content, err := collins.wd.FindElement(selenium.ByID, id)
+	if err != nil {
+		return nil, dict.ErrNotFound
+	}
+
+	elements, err := content.FindElements(selenium.ByClassName, "hom")
+	if err != nil {
+		return nil, err
+	}
+	out := Word{}
+	out.W = word
+	for _, element := range elements {
+		def := Definition{}
+		posElement, err := element.FindElement(selenium.ByClassName, "pos")
+		if err == nil {
+			def.PartOfSpeech, _ = posElement.Text()
+		}
+
+		defElement, err := element.FindElement(selenium.ByClassName, "def")
+		if err == nil {
+			def.Def, _ = defElement.Text()
+		}
+		examples, err := element.FindElements(selenium.ByClassName, "type-example")
+		for _, e := range examples {
+			exampleStr, _ := e.Text()
+			if exampleStr != "" {
+				def.Examples = append(def.Examples, Example{Text: exampleStr})
+			}
+		}
+		out.Defs = append(out.Defs, def)
+	}
+
+	pageSource, err := collins.wd.PageSource()
+	if err == nil {
+		ioutil.WriteFile(filepath.Join(string(dict.Collins), "pages", word+".html"), []byte(pageSource), 0644)
 	}
 
 	return out, nil
 }
 
 func partOfSpeech(pos string) string {
-	if pos == "transitive verb" {
-		return "vt."
-	}
-	if pos == "intransitive verb" {
-		return "v."
-	}
-	return pos
+	return strings.ToLower(pos)
 }

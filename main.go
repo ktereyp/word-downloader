@@ -15,20 +15,22 @@ import (
 	"time"
 	"word-downloader/dict"
 	"word-downloader/dict/bingdict"
+	"word-downloader/dict/collins"
 	"word-downloader/dict/dictcn"
 	"word-downloader/dict/webster"
 )
 
 var wordList = flag.String("word-list", "", "word list, if empty, read from stdio")
-var dictionary = flag.String("dicts", "webster", "dictionary, comma separated. support: webster, dictcn")
+var dictionary = flag.String("dicts", "webster", "dictionary, comma separated. support: webster, dictcn, collins")
 var sleepInterval = flag.Int64("sleep-interval", 1, "number of seconds to sleep before downloading next word")
 var ankiCsv = flag.Bool("anki", false, "generate anki-flash csv file")
 var downloadMp3 = flag.Bool("download-mp3", true, "whether download mp3")
 var queryOnline = flag.Bool("query-online", true, "query online when missing")
 
 var ankiDictScore = map[dict.Dictionary]int{
-	dict.Dictcn:   1,
-	dict.Webster:  2,
+	dict.Collins:  0,
+	dict.Webster:  1,
+	dict.Dictcn:   2,
 	dict.BingDict: 3,
 }
 
@@ -47,6 +49,8 @@ func main() {
 			myDicts = append(myDicts, bingdict.NewBingDict())
 		case dict.Dictcn:
 			myDicts = append(myDicts, dictcn.NewDict())
+		case dict.Collins:
+			myDicts = append(myDicts, collins.NewDict())
 		default:
 			_, _ = fmt.Fprintf(os.Stderr, "unsuported dictionary: %v", *dictionary)
 			flag.PrintDefaults()
@@ -99,11 +103,11 @@ func main() {
 			break
 		}
 		if len(wordBytes) > 0 {
-			cached := true
+			noWait := true
 			var words []dict.Word
 			for _, downloader := range downloaders {
 				word, wordCached, err := downloader.download(strings.TrimSpace(string(wordBytes)))
-				cached = cached && wordCached
+				noWait = (noWait && wordCached) || err == dict.ErrNotFound
 				if err == nil {
 					words = append(words, word)
 				}
@@ -114,7 +118,7 @@ func main() {
 				writeToAnkiCsv(ankiFile, words)
 			}
 			log.Printf("finish: %v", count)
-			if !cached {
+			if !noWait {
 				time.Sleep(time.Second * time.Duration(*sleepInterval))
 			}
 			count++
@@ -196,6 +200,12 @@ func (d *Downloader) loadAllFinished() {
 		if len(line) == 0 {
 			break
 		}
+		if strings.HasPrefix(string(line), "__not_found:") {
+			word := strings.TrimPrefix(string(line), "__not_found:")
+			word = strings.TrimSpace(word)
+			d.existWords[word] = nil
+			continue
+		}
 		word, err := d.dict.Parse(line)
 		if err != nil {
 			log.Fatalf("error: cannot unmarshal word from words.txt: %v, raw: %v", err, string(line))
@@ -208,14 +218,23 @@ func (d *Downloader) download(keyword string) (word dict.Word, cached bool, err 
 	word, exist := d.existWords[keyword]
 	if !exist {
 		if !*queryOnline {
-			return nil, true, fmt.Errorf("not found")
+			return nil, true, dict.ErrNotFound
 		}
 		word, err = d.dict.Lookup(keyword)
-		if err != nil {
+		if err == dict.ErrNotFound {
+			_, err = d.words.WriteString("__not_found:" + keyword + "\n")
+			if err != nil {
+				log.Fatalf("error: cannot write to disk: %v", err)
+			}
+			return nil, false, dict.ErrNotFound
+		} else if err != nil {
 			log.Printf("error: cannot query '%v': %v", keyword, err)
 			return nil, false, err
 		}
 		log.Printf(" lookup ok: %v", word.Word())
+	} else if word == nil {
+		log.Printf(" lookup fail: %v [cache not found]", keyword)
+		return nil, false, dict.ErrNotFound
 	} else {
 		log.Printf(" lookup ok: %v [cache]", word.Word())
 	}

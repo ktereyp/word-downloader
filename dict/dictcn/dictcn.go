@@ -144,18 +144,18 @@ func (e Example) Html() string {
 	return fmt.Sprintf(`<div class=use-example>// %v</div>`, e.Text)
 }
 
-type collinsDict struct {
+type dictcnDict struct {
 	httpClient *http.Client
 }
 
-func (collins *collinsDict) Parse(wordJson []byte) (dict.Word, error) {
+func (dictcn *dictcnDict) Parse(wordJson []byte) (dict.Word, error) {
 	var word Word
 	err := json.Unmarshal(wordJson, &word)
 	return word, err
 }
 
-func NewDict() *collinsDict {
-	return &collinsDict{
+func NewDict() *dictcnDict {
+	return &dictcnDict{
 		httpClient: &http.Client{
 			Transport: &http.Transport{
 				Proxy:               nil,
@@ -168,15 +168,15 @@ func NewDict() *collinsDict {
 	}
 }
 
-func (collins *collinsDict) Type() dict.Dictionary {
+func (dictcn *dictcnDict) Type() dict.Dictionary {
 	return dict.Dictcn
 }
 
-func (collins *collinsDict) Lookup(word string) (dict.Word, error) {
+func (dictcn *dictcnDict) Lookup(word string) (dict.Word, error) {
 	col := colly.NewCollector(
 		colly.UserAgent("Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36"),
 	)
-	col.SetClient(collins.httpClient)
+	col.SetClient(dictcn.httpClient)
 
 	out := Word{}
 
